@@ -25,6 +25,8 @@ DEFAULT_DATA_DIR = Path(".workflow_data")
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser."""
+
     parser = argparse.ArgumentParser(
         prog="workflow",
         description="Resumable content review workflow",
@@ -66,8 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--decisions",
         nargs="+",
-        choices=[decision.value for decision in EvaluationDecision],
-        default=[EvaluationDecision.HUMAN_REVIEW.value],
+        choices=[
+            decision.value
+            for decision in EvaluationDecision
+        ],
+        default=[
+            EvaluationDecision.HUMAN_REVIEW.value
+        ],
         help="Deterministic evaluator decision sequence",
     )
 
@@ -98,15 +105,24 @@ def create_service(
     data_dir: Path,
     decisions: list[EvaluationDecision],
 ) -> Iterator[WorkflowService]:
-    """Create the application service with durable adapters."""
+    """Create the workflow service with durable SQLite adapters."""
 
-    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    event_log = SQLiteEventLog(data_dir / "events.db")
+    event_log = SQLiteEventLog(
+        data_dir / "events.db"
+    )
 
-    with sqlite_checkpointer(data_dir / "checkpoints.db") as saver:
+    with sqlite_checkpointer(
+        data_dir / "checkpoints.db"
+    ) as saver:
         graph = build_workflow_graph(
-            evaluator=FakeEvaluator(decisions=decisions),
+            evaluator=FakeEvaluator(
+                decisions=decisions
+            ),
             reviser=FakeReviser(),
             event_log=event_log,
             checkpointer=saver,
@@ -119,18 +135,23 @@ def create_service(
 
 
 def serialize_state(state: dict) -> dict:
-    """Convert Pydantic models into JSON-compatible values."""
+    """Convert workflow state into JSON-compatible values."""
 
     result = dict(state)
 
-    if isinstance(result.get("content"), ContentItem):
-        result["content"] = result["content"].model_dump(
+    content = result.get("content")
+
+    if isinstance(content, ContentItem):
+        result["content"] = content.model_dump(
             mode="json"
         )
 
     evaluation = result.get("evaluation")
 
-    if evaluation is not None and hasattr(evaluation, "model_dump"):
+    if evaluation is not None and hasattr(
+        evaluation,
+        "model_dump",
+    ):
         result["evaluation"] = evaluation.model_dump(
             mode="json"
         )
@@ -139,24 +160,36 @@ def serialize_state(state: dict) -> dict:
 
 
 def print_json(value: dict | list) -> None:
-    print(json.dumps(value, indent=2))
+    """Print structured CLI output."""
+
+    print(
+        json.dumps(
+            value,
+            indent=2,
+        )
+    )
 
 
 def run_command(args: argparse.Namespace) -> int:
+    """Execute the selected CLI command."""
+
     if args.command == "start":
         decisions = [
             EvaluationDecision(value)
             for value in args.decisions
         ]
     else:
-        # The evaluator will not be called when inspecting or
-        # approving an already interrupted workflow.
-        decisions = [EvaluationDecision.HUMAN_REVIEW]
+        # Reading state and resuming an interrupted human-review
+        # node do not require another evaluator invocation.
+        decisions = [
+            EvaluationDecision.HUMAN_REVIEW
+        ]
 
     with create_service(
         data_dir=args.data_dir,
         decisions=decisions,
     ) as service:
+
         if args.command == "start":
             content = ContentItem(
                 content_id=args.content_id,
@@ -169,37 +202,37 @@ def run_command(args: argparse.Namespace) -> int:
                 content=content,
             )
 
-            output = serialize_state(state)
-
-            if state["status"] not in (
-                "completed",
-                "retry_limit_reached",
-            ):
-                output["status"] = "awaiting_review"
-
-            print_json(output)
+            # WorkflowService determines the correct status.
+            print_json(
+                serialize_state(state)
+            )
             return 0
 
         if args.command == "status":
-            state = service.status(args.workflow_id)
-            output = serialize_state(state)
+            state = service.status(
+                args.workflow_id
+            )
 
-            if state["status"] not in (
-                "completed",
-                "retry_limit_reached",
-            ):
-                output["status"] = "awaiting_review"
-
-            print_json(output)
+            # No manual status override.
+            print_json(
+                serialize_state(state)
+            )
             return 0
 
         if args.command == "approve":
-            state = service.approve(args.workflow_id)
-            print_json(serialize_state(state))
+            state = service.approve(
+                args.workflow_id
+            )
+
+            print_json(
+                serialize_state(state)
+            )
             return 0
 
         if args.command == "events":
-            events = service.events(args.workflow_id)
+            events = service.events(
+                args.workflow_id
+            )
 
             print_json(
                 [
@@ -209,15 +242,22 @@ def run_command(args: argparse.Namespace) -> int:
             )
             return 0
 
-    raise ValueError(f"Unsupported command: {args.command}")
+    raise ValueError(
+        f"Unsupported command: {args.command}"
+    )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+) -> int:
+    """CLI entry point."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
         return run_command(args)
+
     except (
         ValidationError,
         WorkflowConflictError,

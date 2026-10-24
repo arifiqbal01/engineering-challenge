@@ -38,18 +38,36 @@ class WorkflowService:
         }
 
     def _snapshot(self, workflow_id: str):
-        return self._graph.get_state(self._config(workflow_id))
+        """Retrieve the latest LangGraph checkpoint."""
+        return self._graph.get_state(
+            self._config(workflow_id)
+        )
+
+    @staticmethod
+    def _state_from_snapshot(snapshot) -> WorkflowState | None:
+        """
+        Return persisted state with an accurate workflow status.
+
+        LangGraph may pause inside human_review before the node
+        returns its state update. In that case, snapshot.next
+        identifies the pending human-review node.
+        """
+        if not snapshot.values:
+            return None
+
+        state = dict(snapshot.values)
+
+        if snapshot.next == ("human_review",):
+            state["status"] = "awaiting_review"
+
+        return state
 
     def _existing_state(
         self,
         workflow_id: str,
     ) -> WorkflowState | None:
         snapshot = self._snapshot(workflow_id)
-
-        if not snapshot.values:
-            return None
-
-        return snapshot.values
+        return self._state_from_snapshot(snapshot)
 
     def start(
         self,
@@ -100,8 +118,12 @@ class WorkflowService:
         return self.status(workflow_id)
 
     def status(self, workflow_id: str) -> WorkflowState:
-        """Return the latest persisted workflow state."""
+        """
+        Return persisted workflow state.
 
+        The status reflects the actual LangGraph checkpoint,
+        including an interrupted human-review node.
+        """
         state = self._existing_state(workflow_id)
 
         if state is None:
@@ -115,13 +137,12 @@ class WorkflowService:
         """Approve an interrupted workflow idempotently."""
 
         snapshot = self._snapshot(workflow_id)
+        state = self._state_from_snapshot(snapshot)
 
-        if not snapshot.values:
+        if state is None:
             raise WorkflowNotFoundError(
                 f"Workflow not found: {workflow_id}"
             )
-
-        state = snapshot.values
 
         if state["status"] == "completed":
             return state
