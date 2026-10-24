@@ -16,8 +16,11 @@ WorkflowStatus = Literal[
 
 
 class WorkflowState(TypedDict):
+    """State persisted and restored by LangGraph."""
+
     workflow_id: str
     content: ContentItem
     evaluation: EvaluationResult | None
+    evaluation_count: int
     revision_count: int
     status: WorkflowStatus
