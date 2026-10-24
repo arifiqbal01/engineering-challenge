@@ -25,6 +25,23 @@ def content():
 
 
 @pytest.fixture
+def service_factory(tmp_path):
+    """
+    Create a real WorkflowService with SQLite persistence.
+
+    Allows tests to select different deterministic evaluator
+    sequences without mocking the workflow graph.
+    """
+    def factory(decisions):
+        checkpoint_path = tmp_path / "checkpoints.db"
+        event_path = tmp_path / "events.db"
+
+        return checkpoint_path, event_path, decisions
+
+    return factory
+
+
+@pytest.fixture
 def service(tmp_path):
     with sqlite_checkpointer(tmp_path / "checkpoints.db") as saver:
         event_log = SQLiteEventLog(tmp_path / "events.db")
@@ -52,10 +69,14 @@ def test_start_creates_workflow(service, content):
 
     assert state["workflow_id"] == "workflow-001"
     assert state["evaluation_count"] == 1
+    assert state["status"] == "awaiting_review"
 
     events = service.events("workflow-001")
 
     assert events[0].event_type == WorkflowEventType.WORKFLOW_STARTED
+    assert events[0].payload["original_content"] == content.model_dump(
+        mode="json"
+    )
 
 
 def test_start_is_idempotent(service, content):
@@ -91,10 +112,47 @@ def test_start_rejects_conflicting_content(service, content):
         body="Different content.",
     )
 
-    with pytest.raises(WorkflowConflictError):
+    with pytest.raises(
+        WorkflowConflictError,
+        match="different request",
+    ):
         service.start(
             workflow_id="workflow-001",
             content=different_content,
+        )
+
+
+@pytest.mark.parametrize(
+    "changed_field, changed_value",
+    [
+        ("title", "Changed title"),
+        ("body", "Changed body"),
+        ("metadata", {"source": "changed"}),
+    ],
+)
+def test_duplicate_start_rejects_changed_original_content(
+    service,
+    content,
+    changed_field,
+    changed_value,
+):
+    service.start(
+        workflow_id="workflow-001",
+        content=content,
+    )
+
+    changed_data = content.model_dump()
+    changed_data[changed_field] = changed_value
+
+    changed_content = ContentItem(**changed_data)
+
+    with pytest.raises(
+        WorkflowConflictError,
+        match="different request",
+    ):
+        service.start(
+            workflow_id="workflow-001",
+            content=changed_content,
         )
 
 
@@ -108,6 +166,22 @@ def test_status_returns_persisted_state(service, content):
 
     assert state["workflow_id"] == "workflow-001"
     assert state["revision_count"] == 0
+    assert state["status"] == "awaiting_review"
+
+
+def test_status_reflects_human_review_interrupt(service, content):
+    state = service.start(
+        workflow_id="workflow-001",
+        content=content,
+    )
+
+    assert state["status"] == "awaiting_review"
+
+    persisted = service.status("workflow-001")
+
+    assert persisted["status"] == "awaiting_review"
+    assert persisted["evaluation_count"] == 1
+    assert persisted["revision_count"] == 0
 
 
 def test_status_rejects_unknown_workflow(service):
@@ -169,8 +243,103 @@ def test_events_unknown_workflow(service):
 
 
 def test_start_rejects_blank_workflow_id(service, content):
-    with pytest.raises(ValueError, match="cannot be blank"):
+    with pytest.raises(
+        ValueError,
+        match="cannot be blank",
+    ):
         service.start(
             workflow_id="   ",
             content=content,
         )
+
+
+def test_duplicate_start_accepts_original_after_revision(tmp_path):
+    """
+    The current content may have been revised.
+
+    Duplicate-start validation must compare the original
+    submission stored in the start event, not revised content.
+    """
+    with sqlite_checkpointer(tmp_path / "checkpoints.db") as saver:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+
+        graph = build_workflow_graph(
+            evaluator=FakeEvaluator(
+                decisions=[
+                    EvaluationDecision.REVISE,
+                    EvaluationDecision.HUMAN_REVIEW,
+                ]
+            ),
+            reviser=FakeReviser(),
+            event_log=event_log,
+            checkpointer=saver,
+        )
+
+        service = WorkflowService(
+            graph=graph,
+            event_log=event_log,
+        )
+
+        original = ContentItem(
+            content_id="content-001",
+            title="Original title",
+            body="Original body.",
+        )
+
+        first = service.start(
+            workflow_id="workflow-001",
+            content=original,
+        )
+
+        assert first["revision_count"] == 1
+        assert first["evaluation_count"] == 2
+        assert "Revision 1" in first["content"].body
+
+        second = service.start(
+            workflow_id="workflow-001",
+            content=original,
+        )
+
+        assert second == first
+
+        events = service.events("workflow-001")
+
+        assert sum(
+            event.event_type == WorkflowEventType.CONTENT_REVISED
+            for event in events
+        ) == 1
+
+        started_event = event_log.get_event(
+            "workflow-001:started"
+        )
+
+        assert started_event.payload["original_content"] == (
+            original.model_dump(mode="json")
+        )
+
+
+def test_duplicate_start_after_completion_is_idempotent(
+    service,
+    content,
+):
+    service.start(
+        workflow_id="workflow-001",
+        content=content,
+    )
+
+    completed = service.approve("workflow-001")
+
+    repeated = service.start(
+        workflow_id="workflow-001",
+        content=content,
+    )
+
+    assert repeated == completed
+    assert repeated["status"] == "completed"
+
+    events = service.events("workflow-001")
+
+    assert sum(
+        event.event_type == WorkflowEventType.WORKFLOW_COMPLETED
+        for event in events
+    ) == 1

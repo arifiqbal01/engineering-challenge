@@ -373,4 +373,4 @@ def test_conflicting_content_id_is_rejected(data_dir, capsys):
 
     assert code == 1
     assert output is None
-    assert "different content" in error.lower()
+    assert "different request" in error.lower()
